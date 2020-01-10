@@ -13,10 +13,9 @@
 # limitations under the License.
 
 import pandas as pd
-import numpy as np
 
 from abc import ABCMeta, abstractmethod
-from typing import Union, List
+from typing import Callable
 
 
 class TradingStrategy(object, metaclass=ABCMeta):
@@ -59,7 +58,7 @@ class TradingStrategy(object, metaclass=ABCMeta):
 
     @abstractmethod
     def tune(self, steps_per_train: int, steps_per_test: int, episode_callback=None) -> pd.DataFrame:
-        """Tune the agent's hyper-parameters and feature set for the environment.
+        """Tune the agent's hyper-parameters and feature set for the environments.
 
         Arguments:
             steps_per_train: The number of steps per training of each hyper-parameter set.
@@ -72,14 +71,19 @@ class TradingStrategy(object, metaclass=ABCMeta):
         raise NotImplementedError
 
     @abstractmethod
-    def run(self, steps: int = None, episodes: int = None, testing: bool = False, episode_callback=None) -> pd.DataFrame:
-        """Evaluate the agent's performance within the environment.
+    def run(self,
+            steps: int = None,
+            episodes: int = None,
+            render_mode: str = None,
+            evaluation: bool = False,
+            episode_callback: Callable[[pd.DataFrame], bool] = None) -> pd.DataFrame:
+        """Evaluate the agent's performance within the environments.
 
         Arguments:
-            steps: The number of steps to run the agent within the environment. Required if `episodes` is not passed.
-            episodes: The number of episodes to run the agent within the environment. Required if `steps` is not passed.
-            testing: Whether or not the agent should be evaluated on the environment it is running in. Defaults to false.
-            episode_callback (optional): A callback function for monitoring the agent's progress within the environment.
+            steps: The number of steps to run the agent within the environments. Required if `episodes` is not passed.
+            episodes: The number of episodes to run the agent within the environments. Required if `steps` is not passed.
+            evaluation: Whether or not the agent should be evaluated on the environments it is running in. Defaults to false.
+            episode_callback (optional): A callback function for monitoring the agent's progress within the environments.
 
         Returns:
             A history of the agent's trading performance during evaluation.

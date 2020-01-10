@@ -13,103 +13,67 @@
 # limitations under the License
 
 import time
+import ccxt
 import numpy as np
 import pandas as pd
 
-from typing import Dict, List, Generator, Union
-from gym.spaces import Space, Box
-from ccxt import Exchange
+from typing import List, Union
+from ccxt import BadRequest
 
-from tensortrade.trades import Trade, TradeType
-from tensortrade.exchanges import InstrumentExchange
+from tensortrade.trades import Trade, TradeType, TradeSide
+from tensortrade.instruments import TradingPair, BTC, ETH
+from tensortrade.exchanges import Exchange
+
+BTC_ETH_PAIR = TradingPair(BTC, ETH)
 
 
-class CCXTExchange(InstrumentExchange):
-    """An instrument exchange for trading on CCXT-supported cryptocurrency exchanges."""
+class CCXTExchange(Exchange):
+    """An exchange for trading on CCXT-supported cryptocurrency exchanges."""
 
-    def __init__(self, exchange: Exchange,  **kwargs):
-        super().__init__(base_instrument=kwargs.get('base_instrument', 'USD'),
-                         dtype=kwargs.get('dtype', np.float16),
-                         feature_pipeline=kwargs.get('feature_pipeline', None))
+    def __init__(self, exchange: Union[ccxt.Exchange, str] = 'coinbase',  **kwargs):
+        super(CCXTExchange, self).__init__(**kwargs)
 
-        self._exchange = exchange
+        exchange = self.default('exchange', exchange)
 
-        self._exchange.enableRateLimit = kwargs.get('enable_rate_limit', True)
-        self._markets = self._exchange.load_markets()
+        self._exchange = getattr(ccxt, exchange)() if \
+            isinstance(exchange, str) else exchange
 
-        self._observation_type = kwargs.get('observation_type', 'trades')
-        self._observation_symbol = kwargs.get('observation_symbol', 'ETH/BTC')
-        self._timeframe = kwargs.get('timeframe', '10m')
-        self._window_size = kwargs.get('window_size', 1)
+        self._credentials = self.default('credentials', None, kwargs)
+        self._timeframe = self.default('timeframe', '10m', kwargs)
+        self._observation_type = self.default('observation_type', 'ohlcv', kwargs)
+        self._observation_pairs = self.default('observation_pairs', [BTC_ETH_PAIR], kwargs)
+        self._async_timeout_in_ms = self.default('async_timeout_in_ms', 15, kwargs)
+        self._max_trade_wait_in_sec = self.default('max_trade_wait_in_sec', 15, kwargs)
+        self._exchange.enableRateLimit = self.default('enable_rate_limit', True, kwargs)
 
-        self._async_timeout_in_ms = kwargs.get('async_timeout_in_ms', 15)
-        self._max_trade_wait_in_sec = kwargs.get('max_trade_wait_in_sec', 60)
+        self._observation_symbols = [self.pair_to_symbol(pair) for pair in self._observation_pairs]
 
-    @property
-    def base_precision(self) -> float:
-        return self._markets[self._observation_symbol]['precision']['base']
-
-    @base_precision.setter
-    def base_precision(self, base_precision: float):
-        raise ValueError('Cannot set the precision of `ccxt` exchanges.')
+        self._exchange.load_markets()
 
     @property
-    def instrument_precision(self) -> float:
-        return self._markets[self._observation_symbol]['precision']['quote']
+    def is_live(self):
+        return True
 
-    @instrument_precision.setter
-    def instrument_precision(self, instrument_precision: float):
-        raise ValueError('Cannot set the precision of `ccxt` exchanges.')
-
-    @property
-    def initial_balance(self) -> float:
-        return self._initial_balance
+    def is_pair_tradable(self, trading_pair: 'TradingPair') -> bool:
+        return False
 
     @property
-    def balance(self) -> float:
-        return self._exchange.fetch_free_balance()[self._base_instrument]
+    def data_frame(self) -> pd.DataFrame:
+        return self._data_frame
 
     @property
-    def portfolio(self) -> Dict[str, float]:
-        portfolio = self._exchange.fetch_free_balance()
-
-        return {k: v for k, v in portfolio.items() if v > 0}
-
-    @property
-    def trades(self) -> List[Trade]:
-        trades = {}
-
-        for key in self._markets.keys():
-            trades[key] = self._exchange.fetch_my_trades()[key]
-
-        return trades
-
-    @property
-    def performance(self) -> pd.DataFrame:
-        return self._performance
-
-    @property
-    def generated_space(self) -> Space:
-        low_price = float(self._markets[self._observation_symbol]['limits']['price']['min'])
-        high_price = float(self._markets[self._observation_symbol]['limits']['price']['max'])
-        low_volume = float(self._markets[self._observation_symbol]['limits']['amount']['min'])
-        high_volume = float(self._markets[self._observation_symbol]['limits']['amount']['max'])
-
+    def observation_columns(self) -> List[str]:
         if self._observation_type == 'ohlcv':
-            low = np.array([low_price, low_price, low_price, low_price, low_volume])
-            high = np.array([high_price, high_price, high_price, high_price, high_volume])
-        else:
-            low = np.array([0, low_price, low_price, low_price * low_volume])
-            high = np.array([1, high_price, high_volume, high_price * high_volume])
+            return np.array([['{}_open'.format(symbol),
+                              '{}_high'.format(symbol),
+                              '{}_low'.format(symbol),
+                              '{}_close'.format(symbol),
+                              '{}_volume'.format(symbol)] for symbol in self._observation_symbols]).flatten()
 
-        return Box(low=low, high=high, dtype=self._dtype)
-
-    @property
-    def generated_columns(self) -> List[str]:
-        if self._observation_type == 'ohlcv':
-            return list(['open', 'high', 'low', 'close', 'volume'])
-
-        return list(['side', 'price', 'amount', 'cost'])
+        return np.array([['{}_side'.format(symbol),
+                          '{}_price'.format(symbol),
+                          '{}_size'.format(symbol),
+                          '{}_cost'.format(symbol)] for symbol in self._observation_symbols]).flatten()
 
     @property
     def has_next_observation(self) -> bool:
@@ -118,61 +82,83 @@ class CCXTExchange(InstrumentExchange):
 
         return self._exchange.has['fetchTrades']
 
-    def _create_observation_generator(self) -> Generator[pd.DataFrame, None, None]:
-        while True:
+    def next_observation(self, window_size: int = 1) -> pd.DataFrame:
+        observations = pd.DataFrame([], columns=self.observation_columns)
+
+        for symbol in self._observation_symbols:
             if self._observation_type == 'ohlcv':
-                ohlcv = self._exchange.fetch_ohlcv(
-                    self._observation_symbol, timeframe=self._timeframe)
+                ohlcv = self._exchange.fetch_ohlcv(symbol, self._timeframe)
 
-                obs = [l[1:] for l in ohlcv]
+                observations['{}_open'.format(symbol)] = [ohlcv[1]]
+                observations['{}_high'.format(symbol)] = [ohlcv[2]]
+                observations['{}_low'.format(symbol)] = [ohlcv[3]]
+                observations['{}_close'.format(symbol)] = [ohlcv[4]]
+                observations['{}_volume'.format(symbol)] = [ohlcv[5]]
             elif self._observation_type == 'trades':
-                trades = self._exchange.fetch_trades(self._observation_symbol)
+                trades = self._exchange.fetch_trades(symbol)
 
-                obs = [[0 if t['side'] == 'buy' else 1, t['price'], t['amount'], t['cost']]
-                       for t in trades]
+                observations['{}_side'.format(symbol)] = [
+                    0 if trade['side'] == 'buy' else 1 for trade in trades]
+                observations['{}_price'.format(symbol)] = [trade['price'] for trade in trades]
+                observations['{}_size'.format(symbol)] = [trade['size'] for trade in trades]
+                observations['{}_cost'.format(symbol)] = [trade['cost'] for trade in trades]
 
-            if len(obs) < self._window_size:
-                obs = np.pad(obs, (self._window_size - len(obs), len(obs[0])), mode='constant')
+        observations = pd.concat([self._data_frame, observations], ignore_index=True, sort=False)
 
-            if self._feature_pipeline is not None:
-                obs = self._feature_pipeline.transform(obs, self.generated_space)
+        self._data_frame = observations
 
-            yield obs
+        if len(self._data_frame) >= window_size:
+            self._data_frame = self._data_frame.iloc[-(window_size - 1):]
 
-    def current_price(self, symbol: str) -> float:
-        return self._exchange.fetch_ticker(symbol)['close']
+        return self.data_frame
 
-    def execute_trade(self, trade: Trade) -> Trade:
-        if trade.trade_type == TradeType.LIMIT_BUY:
-            order = self._exchange.create_limit_buy_order(
-                symbol=trade.symbol, amount=trade.amount, price=trade.price)
-        elif trade.trade_type == TradeType.MARKET_BUY:
-            order = self._exchange.create_market_buy_order(symbol=trade.symbol, amount=trade.amount)
-        elif trade.trade_type == TradeType.LIMIT_SELL:
-            order = self._exchange.create_limit_sell_order(
-                symbol=trade.symbol, amount=trade.amount, price=trade.price)
-        elif trade.trade_type == TradeType.MARKET_SELL:
-            order = self._exchange.create_market_sell_order(
-                symbol=trade.symbol, amount=trade.amount)
+    def pair_to_symbol(self, pair: 'TradingPair') -> str:
+        return '{}/{}'.format(pair.quote.symbol, pair.base.symbol)
+
+    def quote_price(self, pair: 'TradingPair') -> float:
+        symbol = self.pair_to_symbol(pair)
+
+        try:
+            return self._exchange.fetch_ticker(symbol)['close']
+        except BadRequest:
+            return np.inf
+
+    def execute_order(self, order: 'Order', portfolio: 'Portfolio'):
+        if order.type == TradeType.LIMIT and order.side == TradeSide.BUY:
+            executed_order = self._exchange.create_limit_buy_order(
+                order.symbol, order.size, order.price)
+        elif order.type == TradeType.MARKET and order.side == TradeSide.BUY:
+            executed_order = self._exchange.create_market_buy_order(order.symbol, order.size)
+        elif order.type == TradeType.LIMIT and order.side == TradeSide.SELL:
+            executed_order = self._exchange.create_limit_sell_order(
+                order.symbol, order.size, order.price)
+        elif order.type == TradeType.MARKET and order.side == TradeSide.SELL:
+            executed_order = self._exchange.create_market_sell_order(order.symbol, order.size)
+        else:
+            return order.copy()
 
         max_wait_time = time.time() + self._max_trade_wait_in_sec
 
-        while order['status'] is 'open' and time.time() < max_wait_time:
-            order = self._exchange.fetch_order(order.id)
+        while order['status'] == 'open' and time.time() < max_wait_time:
+            executed_order = self._exchange.fetch_order(order.id)
 
-        if order['status'] is 'open':
+        if order['status'] == 'open':
             self._exchange.cancel_order(order.id)
+            order.cancel(self._exchange)
 
-        self._performance = self._performance.append({
-            'balance': self.balance,
-            'net_worth': self.net_worth,
-        }, ignore_index=True)
+        trade = Trade(order_id=order.id,
+                      exchange_id=self.id,
+                      step=order.step,
+                      pair=order.pair,
+                      side=order.side,
+                      trade_type=order.type,
+                      quantity=executed_order['filled'] * order.pair.base,
+                      price=executed_order['price'],
+                      commission=executed_order['commission'] * order.pair.base)
 
-        return Trade(symbol=trade.symbol, trade_type=trade.trade_type, amount=order['filled'], price=order['price'])
+        order.fill(self, trade)
 
     def reset(self):
         super().reset()
 
-        self._markets = self._exchange.load_markets()
-        self._initial_balance = self._exchange.fetch_free_balance()[self._base_instrument]
-        self._performance = pd.DataFrame([], columns=['balance', 'net_worth'])
+        self._data_frame = pd.DataFrame([], columns=self.observation_columns)

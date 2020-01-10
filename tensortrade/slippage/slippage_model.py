@@ -12,19 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABCMeta, abstractmethod
 
+from abc import abstractmethod
+
+from tensortrade import Component
 from tensortrade.trades import Trade
 
 
-class SlippageModel(object, metaclass=ABCMeta):
+class SlippageModel(Component):
     """A model for simulating slippage on an exchange trade."""
+
+    registered_name = "slippage"
 
     def __init__(self):
         pass
 
     @abstractmethod
-    def fill_order(self, trade: Trade, **kwargs) -> Trade:
+    def adjust_trade(self, trade: Trade, **kwargs) -> Trade:
         """Simulate slippage on a trade ordered on a specific exchange.
 
         Arguments:
@@ -32,7 +36,7 @@ class SlippageModel(object, metaclass=ABCMeta):
             **kwargs: Any other arguments necessary for the model.
 
         Returns:
-            A filled `Trade` with the `price` and `amount` adjusted for slippage.
+            A filled `Trade` with the `price` and `size` adjusted for slippage.
         """
 
         raise NotImplementedError()

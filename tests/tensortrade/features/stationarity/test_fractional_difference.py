@@ -1,17 +1,15 @@
 import pytest
 import numpy as np
 import pandas as pd
-import tensortrade.exchanges as exchanges
 
-from gym.spaces import Box
 
-from tensortrade.features import FeatureTransformer
+from tensortrade.exchanges.simulated import StochasticExchange
 from tensortrade.features.stationarity import FractionalDifference
 
 
 @pytest.fixture
 def exchange():
-    return exchanges.get('fbm')
+    return StochasticExchange(model_type="FBM")
 
 
 @pytest.fixture
@@ -33,11 +31,12 @@ def data_frame():
 
 
 class TestFractionalDifference():
+
     def test_incremental_difference(self, data_frame, exchange):
         transformer = FractionalDifference(
             difference_order=0.5, inplace=True)
 
-        transformed_frame = transformer.transform(data_frame, exchange.generated_space)
+        transformed_frame = transformer.transform(data_frame)
 
         expected_data_frame = pd.DataFrame([{
             'open': -26.20469322,
@@ -67,7 +66,7 @@ class TestFractionalDifference():
             'close': 400,
         }])
 
-        transformed_frame = transformer.transform(next_frame, exchange.generated_space)
+        transformed_frame = transformer.transform(next_frame)
 
         expected_data_frame = pd.DataFrame([{
             'open': 127.785105,
@@ -154,15 +153,3 @@ class TestFractionalDifference():
         }])
 
         assert np.allclose(expected_data_frame.values, transformed_frame.values)
-
-    def test_transform_space(self, data_frame, exchange):
-        transformer = FractionalDifference(difference_order=0.5, inplace=False)
-
-        low = np.array([1E-3, ] * 4 + [1E-3, ])
-        high = np.array([1E3, ] * 4 + [1E3, ])
-
-        input_space = Box(low=low, high=high, dtype=np.float16)
-
-        transformed_space = transformer.transform_space(input_space, exchange.generated_columns)
-
-        assert transformed_space != input_space

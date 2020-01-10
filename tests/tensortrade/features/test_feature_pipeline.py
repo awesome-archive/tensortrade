@@ -3,8 +3,11 @@ import numpy as np
 import pandas as pd
 import tensortrade.exchanges as exchanges
 
-from gym.spaces import Box
+from typing import List
+from itertools import repeat
+from gym.spaces import Space, Box
 
+from tensortrade import TradingContext
 from tensortrade.features import FeaturePipeline, FeatureTransformer
 from tensortrade.features.stationarity import FractionalDifference
 
@@ -32,7 +35,8 @@ def data_frame():
     return data_frame
 
 
-class TestFeaturePipeline():
+class TestFeaturePipeline:
+
     def test_incremental_transform(self, data_frame, exchange):
         difference_all = FractionalDifference(
             difference_order=0.5, inplace=True)
@@ -86,17 +90,41 @@ class TestFeaturePipeline():
 
         assert np.allclose(expected_data_frame.values, transformed_frame.values)
 
-    def test_transform_space(self, data_frame, exchange):
-        difference_all = FractionalDifference(difference_order=0.5, inplace=False)
+        import pandas as pd
 
-        feature_pipeline = FeaturePipeline(steps=[difference_all])
 
-        low = np.array([1E-3, ] * 4 + [1E-3, ])
-        high = np.array([1E3, ] * 4 + [1E3, ])
+class Identity(FeatureTransformer):
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        return X
 
-        input_space = Box(low=low, high=high, dtype=np.float16)
 
-        transformed_space = feature_pipeline.transform_space(
-            input_space, exchange.generated_columns)
+def test_injects_feature_transformation_with_context():
 
-        assert transformed_space != input_space
+    config = {
+        'features': {
+            'shape': (90, 70)
+        }
+    }
+
+    with TradingContext(**config):
+
+        transformer = Identity()
+
+        assert hasattr(transformer.context, 'shape')
+        assert transformer.context.shape == (90, 70)
+
+
+def test_injects_feature_pipeline_with_context():
+
+    config = {
+        'features': {
+            'shape': (90, 70)
+        }
+    }
+
+    with TradingContext(**config):
+
+        steps = list(repeat(Identity(), 5))
+        pipeline = FeaturePipeline(steps)
+        assert hasattr(pipeline.context, 'shape')
+        assert pipeline.context.shape == (90, 70)
